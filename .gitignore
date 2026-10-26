@@ -1,0 +1,21 @@
+# Rust compilation artifacts
+/target
+Cargo.lock
+
+# Foundry artifacts
+/contracts/out
+/contracts/cache
+
+# Secrets and environment configurations
+.env
+*.env
+!.env.example
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
