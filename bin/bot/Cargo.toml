@@ -6,6 +6,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+name = "mev_bot"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mev-bot"
 path = "src/main.rs"
@@ -22,3 +26,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 eyre.workspace = true
+revm.workspace = true
