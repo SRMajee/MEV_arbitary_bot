@@ -9,8 +9,10 @@ license.workspace = true
 [dependencies]
 alloy.workspace = true
 mev-types.workspace = true
+tokio.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
+

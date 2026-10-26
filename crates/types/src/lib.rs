@@ -106,8 +106,8 @@ pub struct V2PoolState {
     pub block_timestamp_last: u32,
 }
 
-/// In-memory snapshot of a Uniswap V3 pool's active tick & price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// In-memory snapshot of a Uniswap V3 pool's active tick, price, and sparse tick bitmap words.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct V3PoolState {
     /// Current Q64.96 square root price.
     pub sqrt_price_x96: U256,
@@ -115,6 +115,11 @@ pub struct V3PoolState {
     pub tick: i32,
     /// Total active liquidity in the current tick.
     pub liquidity: u128,
+    /// Pool tick spacing (e.g., 10 for 500 bps, 60 for 3000 bps).
+    pub tick_spacing: i32,
+    /// Sparse map of initialized tick bitmap words around the active tick:
+    /// word_pos (int16) -> bitmap word (256 bits).
+    pub tick_bitmap: std::collections::BTreeMap<i16, U256>,
 }
 
 /// Dynamic pool reserve / tick state.
