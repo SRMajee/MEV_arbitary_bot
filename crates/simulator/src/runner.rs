@@ -16,6 +16,8 @@ pub struct SimulationResult {
     pub gas_used: u64,
     /// Returned output bytes (or revert reason bytes).
     pub output: Bytes,
+    /// Address of created contract if this was a deployment.
+    pub created_address: Option<Address>,
     /// Logs emitted during execution.
     pub logs: Vec<revm::primitives::Log>,
 }
@@ -135,27 +137,52 @@ impl SimulationRunner {
         match result {
             ExecutionResult::Success {
                 gas, logs, output, ..
-            } => SimulationResult {
-                success: true,
-                gas_used: gas.tx_gas_used(),
-                output: output.into_data(),
-                logs,
-            },
+            } => {
+                let created_address = output.address().copied();
+                SimulationResult {
+                    success: true,
+                    gas_used: gas.tx_gas_used(),
+                    output: output.into_data(),
+                    created_address,
+                    logs,
+                }
+            }
             ExecutionResult::Revert {
                 gas, output, logs, ..
             } => SimulationResult {
                 success: false,
                 gas_used: gas.tx_gas_used(),
                 output,
+                created_address: None,
                 logs,
             },
             ExecutionResult::Halt { gas, logs, .. } => SimulationResult {
                 success: false,
                 gas_used: gas.tx_gas_used(),
                 output: Bytes::default(),
+                created_address: None,
                 logs,
             },
         }
+    }
+}
+
+/// Helper to construct a standard `TxEnv` for EVM contract deployment (CREATE).
+pub fn build_create_tx(
+    caller: Address,
+    init_code: Bytes,
+    value: U256,
+    gas_limit: u64,
+    gas_price: Option<u128>,
+) -> TxEnv {
+    TxEnv {
+        caller,
+        kind: revm::primitives::TxKind::Create,
+        data: init_code,
+        value,
+        gas_limit,
+        gas_price: gas_price.unwrap_or(30_000_000_000u128),
+        ..Default::default()
     }
 }
 

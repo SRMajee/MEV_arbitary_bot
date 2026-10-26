@@ -6,7 +6,7 @@ pub mod runner;
 
 pub use db::{AlloyDB, AlloyDBError};
 pub use fork::ForkedSandbox;
-pub use runner::{build_call_tx, SimulationResult, SimulationRunner};
+pub use runner::{build_call_tx, build_create_tx, SimulationResult, SimulationRunner};
 
 use mev_state::MarketState;
 use revm::database::EmptyDB;

@@ -10,6 +10,12 @@ license.workspace = true
 alloy.workspace = true
 mev-types.workspace = true
 mev-state.workspace = true
+mev-simulator.workspace = true
+mev-executor.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+revm.workspace = true

@@ -49,5 +49,16 @@ mod tests {
 
         assert_eq!(params.bribeBps, 9000);
         assert_eq!(params.hops.len(), 1);
+
+        assert!(!MevExecutorContract::BYTECODE.is_empty());
+
+        use alloy::sol_types::SolCall;
+        let call = MevExecutorContract::executeArbitrageDirectCall { params };
+        let encoded = call.abi_encode();
+        assert!(!encoded.is_empty());
+
+        use alloy::sol_types::SolValue;
+        let c_encoded = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").abi_encode();
+        assert_eq!(c_encoded.len(), 32);
     }
 }
