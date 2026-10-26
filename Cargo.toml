@@ -1,0 +1,68 @@
+[workspace]
+members = [
+    "crates/types",
+    "crates/collector",
+    "crates/state",
+    "crates/simulator",
+    "crates/strategy",
+    "crates/executor",
+    "bin/bot",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["MEV Core Systems Team"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+alloy = { version = "2.5.0", features = [
+    "full",
+    "node-bindings",
+    "rpc-types-mev",
+    "transport-ws",
+    "transport-ipc",
+] }
+revm = { version = "43.0.3", default-features = false, features = ["std"] }
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+eyre = "0.6"
+thiserror = "2.0"
+parking_lot = "0.12"
+dashmap = "6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Workspace Internal Crates
+mev-types = { path = "crates/types" }
+mev-collector = { path = "crates/collector" }
+mev-state = { path = "crates/state" }
+mev-simulator = { path = "crates/simulator" }
+mev-strategy = { path = "crates/strategy" }
+mev-executor = { path = "crates/executor" }
+
+[profile.dev]
+opt-level = 0
+debug = true
+codegen-units = 1
+incremental = false
+
+[profile.dev.build-override]
+opt-level = 0
+codegen-units = 1
+incremental = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

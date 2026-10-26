@@ -1,0 +1,24 @@
+[package]
+name = "mev-bot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mev-bot"
+path = "src/main.rs"
+
+[dependencies]
+alloy.workspace = true
+mev-types.workspace = true
+mev-collector.workspace = true
+mev-state.workspace = true
+mev-simulator.workspace = true
+mev-strategy.workspace = true
+mev-executor.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eyre.workspace = true
