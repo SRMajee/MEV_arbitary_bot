@@ -13,3 +13,4 @@ tokio.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
+futures-util = "0.3"

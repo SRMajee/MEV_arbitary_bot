@@ -3,7 +3,7 @@
 //! Designed for zero-overhead passing between ingestion, state tracking, simulation,
 //! and bundle dispatch modules.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 
 /// Supported Automated Market Maker protocol variants.
@@ -167,6 +167,42 @@ impl Cycle {
 
         true
     }
+}
+
+/// A normalized swap extracted from a pending victim transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedSwap {
+    /// Originating transaction hash.
+    pub tx_hash: B256,
+    /// Router contract target.
+    pub router: Address,
+    /// Protocol type (UniswapV2 or UniswapV3).
+    pub protocol: PoolVariant,
+    /// Address of input token.
+    pub token_in: Address,
+    /// Address of output token.
+    pub token_out: Address,
+    /// Token path (for multi-hop router calls).
+    pub path: Vec<Address>,
+    /// Exact or maximum amount of input token.
+    pub amount_in: U256,
+    /// Exact or minimum amount of output token.
+    pub amount_out_min: U256,
+    /// Recipient of the swap output.
+    pub recipient: Address,
+}
+
+/// A block header notification event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewBlockHeader {
+    /// Block height number.
+    pub number: u64,
+    /// Block hash.
+    pub hash: B256,
+    /// EIP-1559 base fee per gas.
+    pub base_fee_per_gas: Option<u128>,
+    /// Unix block timestamp.
+    pub timestamp: u64,
 }
 
 #[cfg(test)]

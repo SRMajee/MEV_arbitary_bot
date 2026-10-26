@@ -1,17 +1,12 @@
 //! Ingestion engine for mempool pending transactions and new block headers.
 
-use mev_types::Token;
+pub mod decoder;
+pub mod routers;
+pub mod stream;
 
-/// Collector configuration.
-#[derive(Debug, Clone)]
-pub struct CollectorConfig {
-    /// Target WETH token address.
-    pub weth: Token,
-}
-
-impl CollectorConfig {
-    /// Creates a new collector configuration.
-    pub fn new(weth: Token) -> Self {
-        Self { weth }
-    }
-}
+pub use decoder::{parse_v3_path, CalldataDecoder};
+pub use routers::{
+    is_target_router, SUSHISWAP_V2_ROUTER, UNISWAP_UNIVERSAL_ROUTER,
+    UNISWAP_UNIVERSAL_ROUTER_LEGACY, UNISWAP_V2_ROUTER_02, UNISWAP_V3_SWAP_ROUTER_02,
+};
+pub use stream::{Collector, CollectorConfig, CollectorMetrics, CollectorStream, TransportMode};
