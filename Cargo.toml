@@ -25,7 +25,7 @@ alloy = { version = "2.5.0", features = [
     "transport-ws",
     "transport-ipc",
 ] }
-revm = { version = "43.0.3", default-features = false, features = ["std"] }
+revm = { version = "43.0.3" }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

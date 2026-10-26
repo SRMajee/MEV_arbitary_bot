@@ -11,6 +11,7 @@ alloy.workspace = true
 mev-types.workspace = true
 mev-state.workspace = true
 revm.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
