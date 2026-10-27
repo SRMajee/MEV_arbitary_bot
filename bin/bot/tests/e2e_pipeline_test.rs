@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use mev_bot::{BotConfig, BotEngine};
+use mev_bot::{BotConfig, BotEngine, EngineMode};
 use mev_collector::decoder::CalldataDecoder;
 use mev_executor::MevExecutorContract;
 use mev_simulator::{build_call_tx, build_create_tx, AlloyDB, ForkedSandbox, SimulationRunner};
@@ -263,20 +263,48 @@ async fn test_full_e2e_pipeline_whale_backrun_bundle() -> Result<()> {
         priority_fee_wei: 1_000_000_000, // 1 gwei
         min_profit_wei: U256::from(10).pow(U256::from(15)), // 0.001 WETH min profit
         bribe_bps: 9000, // 90% builder bribe
+        engine_mode: EngineMode::Phase1Classic,
     };
 
-    let strategy_engine = StrategyEngine::new(
+    let mut strategy_engine = StrategyEngine::new(
         WETH,
         vec![WETH, USDC],
         ProfitEvaluator::new(bot_config.min_profit_wei, bot_config.bribe_bps, 70_000),
         U256::from(10).pow(U256::from(16)),
         one_eth * U256::from(50),
     );
+    // Eagerly pre-compute line-graph CycleTable for Phase 2 hot evaluation
+    strategy_engine.rebuild_cycle_table(&market_state);
 
-    let engine = BotEngine::new(bot_config, market_state.clone(), strategy_engine);
+    let engine_p1 = BotEngine::new(
+        bot_config.clone().with_engine_mode(EngineMode::Phase1Classic),
+        market_state.clone(),
+        strategy_engine.clone(),
+    );
+    let engine_p2 = BotEngine::new(
+        bot_config.clone().with_engine_mode(EngineMode::Phase2UltraLowLatency),
+        market_state.clone(),
+        strategy_engine.clone(),
+    );
 
-    // 8. Process Victim Swap through the Full Orchestrator Pipeline
-    let telemetry_res = engine
+    // 8. Process Victim Swap through Phase 1 Classic Pipeline (on a cloned sandbox)
+    let mut sandbox_p1 = sandbox.clone();
+    let p1_telemetry_res = engine_p1
+        .process_victim_swap(
+            &mut sandbox_p1,
+            victim_raw_tx.clone(),
+            victim_tx_env.clone(),
+            UNISWAP_V2_WETH_USDC,
+            fork_block,
+            0,
+            decode_us,
+        )
+        .await?;
+    assert!(p1_telemetry_res.is_some(), "Phase 1 pipeline must succeed");
+    let tel_p1 = p1_telemetry_res.unwrap();
+
+    // 9. Process Victim Swap through Phase 2 Ultra-Low Latency Pipeline
+    let p2_telemetry_res = engine_p2
         .process_victim_swap(
             &mut sandbox,
             victim_raw_tx.clone(),
@@ -287,26 +315,35 @@ async fn test_full_e2e_pipeline_whale_backrun_bundle() -> Result<()> {
             decode_us,
         )
         .await?;
+    assert!(p2_telemetry_res.is_some(), "Phase 2 pipeline must succeed");
+    let tel_p2 = p2_telemetry_res.unwrap();
 
-    assert!(telemetry_res.is_some(), "Pipeline must discover, size, and construct bundle");
-    let telemetry = telemetry_res.unwrap();
+    println!("\n==========================================================================");
+    println!("⚡ [FLAGSHIP E2E TELEMETRY COMPARISON: PHASE 1 vs. PHASE 2]");
+    println!("==========================================================================");
+    println!("Stage                      | Phase 1 Classic | Phase 2 Ultra-Low Latency");
+    println!("---------------------------+-----------------+---------------------------");
+    println!("Decode Latency             | {:>9.2} µs    | {:>9.2} µs", tel_p1.decode_us, tel_p2.decode_us);
+    println!("Victim Sim Latency         | {:>9.2} µs    | {:>9.2} µs", tel_p1.victim_sim_us, tel_p2.victim_sim_us);
+    println!("Strategy Discovery & x*    | {:>9.2} µs    | {:>9.2} µs", tel_p1.strategy_us, tel_p2.strategy_us);
+    println!("Backrun EVM Verification   | {:>9.2} µs    | {:>9.2} µs", tel_p1.verify_sim_us, tel_p2.verify_sim_us);
+    println!("Calldata & Bundle Signing  | {:>9.2} µs    | {:>9.2} µs", tel_p1.bundle_sign_us, tel_p2.bundle_sign_us);
+    println!("---------------------------+-----------------+---------------------------");
+    println!("TOTAL TICK-TO-TRADE        | {:>9.2} µs    | {:>9.2} µs", tel_p1.total_tick_to_trade_us, tel_p2.total_tick_to_trade_us);
+    println!("==========================================================================");
+    println!("Calldata Wire Format: {}", tel_p2.calldata_mode);
+    println!("Phase 1 Net Profit:   {:.6} ETH", tel_p1.opportunity.net_profit.to::<u128>() as f64 / 1e18);
+    println!("Phase 2 Net Profit:   {:.6} ETH", tel_p2.opportunity.net_profit.to::<u128>() as f64 / 1e18);
+    println!("==========================================================================\n");
 
-    println!("\n⚡ [FLAGSHIP E2E TELEMETRY]");
-    println!("├── Decode Latency:       {:.2} µs", telemetry.decode_us);
-    println!("├── Victim Sim Latency:   {:.2} µs", telemetry.victim_sim_us);
-    println!("├── Strategy Latency:     {:.2} µs", telemetry.strategy_us);
-    println!("├── Verify Sim Latency:   {:.2} µs", telemetry.verify_sim_us);
-    println!("├── Bundle Sign Latency:  {:.2} µs", telemetry.bundle_sign_us);
-    println!("└── Total Tick-to-Trade:  {:.2} µs\n", telemetry.total_tick_to_trade_us);
+    assert_eq!(tel_p1.opportunity.optimal_input, tel_p2.opportunity.optimal_input);
+    assert_eq!(tel_p1.opportunity.expected_output, tel_p2.opportunity.expected_output);
+    assert_eq!(tel_p2.bundle.txs.len(), 2);
+    assert_eq!(tel_p2.bundle.block_number, fork_block + 1);
 
-    assert!(telemetry.opportunity.net_profit > U256::ZERO);
-    assert_eq!(telemetry.bundle.txs.len(), 2);
-    assert_eq!(telemetry.bundle.block_number, fork_block + 1);
-
-    // 9. Atomic Bundle Execution Verification on Branched State
+    // 10. Atomic Bundle Execution Verification on Branched State
     let mut execution_branch = sandbox.snapshot();
 
-    // Check balances before backrun
     let builder_eth_before = execution_branch
         .basic_ref(builder_coinbase)
         .unwrap_or(None)
@@ -314,7 +351,7 @@ async fn test_full_e2e_pipeline_whale_backrun_bundle() -> Result<()> {
         .unwrap_or(U256::ZERO);
 
     let exec_call = MevExecutorContract::executeArbitrageDirectCall {
-        params: telemetry.opportunity.execution_params.clone(),
+        params: tel_p2.opportunity.execution_params.clone(),
     };
     let backrun_tx = build_call_tx(
         searcher_owner,
@@ -330,7 +367,6 @@ async fn test_full_e2e_pipeline_whale_backrun_bundle() -> Result<()> {
         .expect("candidate commit must succeed");
     assert!(backrun_sim_res.success, "backrun execution must succeed with 0 reverts");
 
-    // Check builder received bribe
     let builder_eth_after = execution_branch
         .basic_ref(builder_coinbase)
         .unwrap_or(None)

@@ -3,7 +3,7 @@
 use alloy::primitives::{address, Address, U256};
 use alloy::signers::local::PrivateKeySigner;
 use eyre::{Result, WrapErr};
-use mev_bot::{BotConfig, BotEngine};
+use mev_bot::{BotConfig, BotEngine, EngineMode};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
         priority_fee_wei: 1_000_000_000, // 1 gwei priority fee
         min_profit_wei: U256::from(2_000_000_000_000_000u64),
         bribe_bps: 9000,
+        engine_mode: EngineMode::Phase2UltraLowLatency,
     };
 
     let _engine = BotEngine::new(bot_config, market_state, strategy_engine);
