@@ -15,4 +15,14 @@ dashmap.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
+arc-swap.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "market_state_latency"
+harness = false
+
 

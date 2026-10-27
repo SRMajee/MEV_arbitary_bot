@@ -2,12 +2,14 @@
 
 pub mod market;
 pub mod multicall;
+pub mod registry;
 pub mod sync;
 pub mod tick_math;
 pub mod whitelist;
 
-pub use market::MarketState;
+pub use market::{HotMarketState, MarketState};
 pub use multicall::{MulticallLoader, MULTICALL3_ADDRESS};
+pub use registry::IdRegistry;
 pub use sync::StateSynchronizer;
 pub use tick_math::{
     compress_tick, next_initialized_tick_within_one_word, tick_to_bit_pos, tick_to_word_pos,

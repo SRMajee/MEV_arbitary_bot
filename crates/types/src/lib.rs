@@ -197,6 +197,158 @@ pub struct DecodedSwap {
     pub recipient: Address,
 }
 
+/// Compact 16-bit identifier for zero-overhead token indexing on the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct TokenId(pub u16);
+
+impl From<u16> for TokenId {
+    #[inline(always)]
+    fn from(id: u16) -> Self {
+        Self(id)
+    }
+}
+
+impl From<TokenId> for u16 {
+    #[inline(always)]
+    fn from(id: TokenId) -> Self {
+        id.0
+    }
+}
+
+/// Compact 16-bit identifier for zero-overhead pool indexing on the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct PoolId(pub u16);
+
+impl From<u16> for PoolId {
+    #[inline(always)]
+    fn from(id: u16) -> Self {
+        Self(id)
+    }
+}
+
+impl From<PoolId> for u16 {
+    #[inline(always)]
+    fn from(id: PoolId) -> Self {
+        id.0
+    }
+}
+
+/// A 64-byte L1 CPU cache-line aligned hot pricing state for Uniswap V2 and V3 pools.
+///
+/// Designed with zero padding overhead:
+/// - Fits exactly inside one 64-byte L1 cache line (`size_of == 64`, `align_of == 64`).
+/// - Replaces random heap pointer dereferences with direct array indexing `pools[pool_id.0 as usize]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C, align(64))]
+pub struct HotPoolState {
+    /// For V2: reserve0 (uint112). For V3: lower 128 bits of sqrtPriceX96 (uint160).
+    pub slot0_lo: u128,              // 16 bytes (offset 0..16)
+    /// For V2: reserve1 (uint112). For V3: active liquidity (uint128).
+    pub slot1_liquidity: u128,       // 16 bytes (offset 16..32)
+    /// For V3: upper 32 bits of sqrtPriceX96 (stored in u64 for alignment). Unused (0) in V2.
+    pub sqrt_price_hi: u64,          // 8 bytes  (offset 32..40)
+    pub tick: i32,                   // 4 bytes  (offset 40..44)
+    pub fee_pips: u32,               // 4 bytes  (offset 44..48)
+    pub block_timestamp_last: u32,   // 4 bytes  (offset 48..52)
+    pub token0: TokenId,             // 2 bytes  (offset 52..54)
+    pub token1: TokenId,             // 2 bytes  (offset 54..56)
+    pub pool_id: PoolId,             // 2 bytes  (offset 56..58)
+    pub variant: u8,                 // 1 byte   (offset 58..59) -> 0 = V2, 1 = V3
+    pub _padding: [u8; 5],           // 5 bytes  (offset 59..64) -> Total = 64 bytes!
+}
+
+impl HotPoolState {
+    /// Constructs a HotPoolState from a Uniswap V2 pool state.
+    #[inline(always)]
+    pub fn from_v2(
+        pool_id: PoolId,
+        token0: TokenId,
+        token1: TokenId,
+        fee_pips: u32,
+        reserve0: u128,
+        reserve1: u128,
+        block_timestamp_last: u32,
+    ) -> Self {
+        Self {
+            slot0_lo: reserve0,
+            slot1_liquidity: reserve1,
+            sqrt_price_hi: 0,
+            tick: 0,
+            fee_pips,
+            block_timestamp_last,
+            token0,
+            token1,
+            pool_id,
+            variant: 0,
+            _padding: [0; 5],
+        }
+    }
+
+    /// Constructs a HotPoolState from a Uniswap V3 pool state.
+    #[inline(always)]
+    pub fn from_v3(
+        pool_id: PoolId,
+        token0: TokenId,
+        token1: TokenId,
+        fee_pips: u32,
+        sqrt_price_x96: U256,
+        liquidity: u128,
+        tick: i32,
+        block_timestamp_last: u32,
+    ) -> Self {
+        let slot0_lo: u128 = (sqrt_price_x96 & U256::from(u128::MAX)).to::<u128>();
+        let shifted: U256 = sqrt_price_x96 >> 128usize;
+        let sqrt_price_hi: u64 = (shifted & U256::from(u64::MAX)).to::<u64>();
+        Self {
+            slot0_lo,
+            slot1_liquidity: liquidity,
+            sqrt_price_hi,
+            tick,
+            fee_pips,
+            block_timestamp_last,
+            token0,
+            token1,
+            pool_id,
+            variant: 1,
+            _padding: [0; 5],
+        }
+    }
+
+    /// Returns Uniswap V2 (reserve0, reserve1) with zero overhead.
+    #[inline(always)]
+    pub fn v2_reserves(&self) -> (u128, u128) {
+        (self.slot0_lo, self.slot1_liquidity)
+    }
+
+    /// Reconstructs the 160-bit Uniswap V3 sqrtPriceX96 as U256 with zero overhead.
+    #[inline(always)]
+    pub fn v3_sqrt_price_x96(&self) -> U256 {
+        let lo = U256::from(self.slot0_lo);
+        let hi = U256::from(self.sqrt_price_hi) << 128;
+        lo | hi
+    }
+
+    /// Returns active Uniswap V3 liquidity.
+    #[inline(always)]
+    pub fn v3_liquidity(&self) -> u128 {
+        self.slot1_liquidity
+    }
+
+    /// True if pool is Uniswap V2 variant.
+    #[inline(always)]
+    pub fn is_v2(&self) -> bool {
+        self.variant == 0
+    }
+
+    /// True if pool is Uniswap V3 variant.
+    #[inline(always)]
+    pub fn is_v3(&self) -> bool {
+        self.variant == 1
+    }
+}
+
 /// A block header notification event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewBlockHeader {
@@ -214,6 +366,57 @@ pub struct NewBlockHeader {
 mod tests {
     use super::*;
     use alloy::primitives::address;
+
+    #[test]
+    fn test_hot_pool_state_cache_line_alignment_and_accessors() {
+        assert_eq!(
+            std::mem::size_of::<HotPoolState>(),
+            64,
+            "HotPoolState MUST be exactly 64 bytes (1 CPU cache line)"
+        );
+        assert_eq!(
+            std::mem::align_of::<HotPoolState>(),
+            64,
+            "HotPoolState MUST be aligned to 64 bytes"
+        );
+
+        // Test V2 packing & unpacking
+        let v2 = HotPoolState::from_v2(
+            PoolId(42),
+            TokenId(1),
+            TokenId(2),
+            3000,
+            100_000 * 10u128.pow(6),
+            50 * 10u128.pow(18),
+            1711000000,
+        );
+        assert!(v2.is_v2());
+        assert!(!v2.is_v3());
+        assert_eq!(v2.pool_id, PoolId(42));
+        assert_eq!(v2.token0, TokenId(1));
+        assert_eq!(v2.token1, TokenId(2));
+        assert_eq!(v2.fee_pips, 3000);
+        assert_eq!(v2.v2_reserves(), (100_000 * 10u128.pow(6), 50 * 10u128.pow(18)));
+
+        // Test V3 packing & unpacking
+        let original_sqrt = U256::from_str_radix("79228162514264337593543950336", 10).unwrap(); // 1.0 in Q64.96
+        let v3 = HotPoolState::from_v3(
+            PoolId(99),
+            TokenId(10),
+            TokenId(20),
+            500,
+            original_sqrt,
+            1_000_000_000u128,
+            -1200,
+            1711000000,
+        );
+        assert!(v3.is_v3());
+        assert!(!v3.is_v2());
+        assert_eq!(v3.pool_id, PoolId(99));
+        assert_eq!(v3.v3_sqrt_price_x96(), original_sqrt);
+        assert_eq!(v3.v3_liquidity(), 1_000_000_000u128);
+        assert_eq!(v3.tick, -1200);
+    }
 
     #[test]
     fn test_canonical_token_ordering() {
