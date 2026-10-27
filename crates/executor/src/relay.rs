@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
-use crate::bundle::{CallBundleResponse, JsonRpcRequest, MevBundle, SendBundleParams};
-use crate::signer::BundleSigner;
+use crate::bundle::{CallBundleResponse, MevBundle};
+use crate::signer::{BundleSigner, PreSignedBundlePayload};
 
 /// Flashbots Builder Relay endpoint.
 pub const FLASHBOTS_RELAY_URL: &str = "https://relay.flashbots.net";
@@ -75,34 +75,37 @@ impl RelayClient {
     }
 
     /// Broadcasts an atomic bundle concurrently to all configured builder relays.
+    ///
+    /// Automatically performs single-serialization and single EIP-191 signing before fan-out.
     pub async fn broadcast_bundle(
         &self,
         bundle: &MevBundle,
         signer: &BundleSigner,
     ) -> Vec<RelayBroadcastResult> {
-        let rpc_req: JsonRpcRequest<SendBundleParams> = bundle.to_send_bundle_rpc(1);
-        let body = match serde_json::to_vec(&rpc_req) {
-            Ok(b) => b,
+        let payload = match signer.prepare_bundle_payload(bundle) {
+            Ok(p) => p,
             Err(e) => {
-                error!("Failed to serialize eth_sendBundle request: {:?}", e);
+                error!("Failed to prepare bundle payload: {:?}", e);
                 return Vec::new();
             }
         };
 
-        let signature_header = match signer.sign_flashbots_request(&body) {
-            Ok(h) => h,
-            Err(e) => {
-                error!("Failed to sign Flashbots request: {:?}", e);
-                return Vec::new();
-            }
-        };
+        self.broadcast_pre_signed(&payload).await
+    }
 
+    /// Broadcasts a pre-serialized, pre-signed bundle payload concurrently across all configured relays.
+    ///
+    /// Employs zero-copy sharing of the body and signature across tasks.
+    pub async fn broadcast_pre_signed(
+        &self,
+        payload: &PreSignedBundlePayload,
+    ) -> Vec<RelayBroadcastResult> {
         let mut set = tokio::task::JoinSet::new();
         for endpoint in &self.endpoints {
             let client = self.client.clone();
             let endpoint = endpoint.clone();
-            let body = body.clone();
-            let sig = signature_header.clone();
+            let body = payload.body.to_vec();
+            let sig = payload.flashbots_signature.clone();
 
             set.spawn(async move {
                 let res = client

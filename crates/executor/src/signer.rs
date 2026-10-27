@@ -148,6 +148,95 @@ impl BundleSigner {
         let bundle = MevBundle::new(vec![victim_hex, backrun_hex], target_block);
         Ok((bundle, backrun_tx_bytes))
     }
+
+    /// Pre-serializes the JSON-RPC request and signs the Flashbots authentication header once.
+    pub fn prepare_bundle_payload(&self, bundle: &MevBundle) -> Result<PreSignedBundlePayload> {
+        let rpc_req = bundle.to_send_bundle_rpc(1);
+        let body_bytes = serde_json::to_vec(&rpc_req)
+            .wrap_err("failed to serialize eth_sendBundle request")?;
+        let signature = self.sign_flashbots_request(&body_bytes)?;
+        Ok(PreSignedBundlePayload {
+            body: Bytes::from(body_bytes),
+            flashbots_signature: signature,
+            block_number: bundle.block_number,
+        })
+    }
+}
+
+/// Pre-serialized and pre-signed bundle request payload ready for zero-copy concurrent relay fan-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreSignedBundlePayload {
+    /// Shared JSON-RPC request body bytes (`Bytes` for O(1) Arc clone across async tasks).
+    pub body: Bytes,
+    /// Shared pre-computed `X-Flashbots-Signature` header value.
+    pub flashbots_signature: String,
+    /// Target block number.
+    pub block_number: u64,
+}
+
+/// High-throughput bundle signing and payload preparation engine.
+#[derive(Debug, Clone)]
+pub struct FastBundleSigner {
+    signer: BundleSigner,
+}
+
+impl FastBundleSigner {
+    /// Creates a new fast bundle signer wrapping a dual-key `BundleSigner`.
+    pub fn new(signer: BundleSigner) -> Self {
+        Self { signer }
+    }
+
+    /// Access the underlying `BundleSigner`.
+    pub fn inner(&self) -> &BundleSigner {
+        &self.signer
+    }
+
+    /// Signs an EIP-1559 backrun transaction with stack-allocated or pre-encoded calldata.
+    pub fn sign_backrun_raw(
+        &self,
+        nonce: u64,
+        executor_contract: Address,
+        calldata: &[u8],
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+    ) -> Result<Bytes> {
+        self.signer.sign_backrun_tx(
+            nonce,
+            executor_contract,
+            Bytes::copy_from_slice(calldata),
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+        )
+    }
+
+    /// Fast bundle pipeline: builds signed backrun, formats bundle, and single-signs payload for multi-relay broadcast.
+    pub fn construct_and_prepare_payload(
+        &self,
+        victim_raw_tx: &Bytes,
+        nonce: u64,
+        executor_contract: Address,
+        calldata: &[u8],
+        gas_limit: u64,
+        current_base_fee: u64,
+        priority_fee: u64,
+        target_block: u64,
+    ) -> Result<(MevBundle, Bytes, PreSignedBundlePayload)> {
+        let (bundle, backrun_bytes) = self.signer.construct_signed_bundle(
+            victim_raw_tx.clone(),
+            nonce,
+            executor_contract,
+            Bytes::copy_from_slice(calldata),
+            gas_limit,
+            current_base_fee,
+            priority_fee,
+            target_block,
+        )?;
+
+        let payload = self.signer.prepare_bundle_payload(&bundle)?;
+        Ok((bundle, backrun_bytes, payload))
+    }
 }
 
 #[cfg(test)]
@@ -205,5 +294,37 @@ mod tests {
         assert_eq!(bundle.txs[0], "0x02f86001");
         assert!(bundle.txs[1].starts_with("0x02"));
         assert_eq!(backrun_bytes[0], 0x02);
+    }
+
+    #[test]
+    fn test_fast_bundle_signer_and_payload_preparation() {
+        let auth_key = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let tx_key = "0x0000000000000000000000000000000000000000000000000000000000000002";
+        let signer = BundleSigner::from_hex_keys(auth_key, tx_key, 1).unwrap();
+        let fast_signer = FastBundleSigner::new(signer);
+
+        let dummy_victim = Bytes::from_static(&[0x02, 0xf8, 0x60, 0x01]);
+        let executor_contract = address!("8888888888888888888888888888888888888888");
+        let dummy_calldata = [0x12, 0x34, 0x56, 0x78];
+
+        let (bundle, backrun_bytes, payload) = fast_signer
+            .construct_and_prepare_payload(
+                &dummy_victim,
+                5,
+                executor_contract,
+                &dummy_calldata,
+                250_000,
+                20_000_000_000,
+                1_000_000_000,
+                19_500_001,
+            )
+            .unwrap();
+
+        assert_eq!(bundle.block_number, 19_500_001);
+        assert_eq!(bundle.txs.len(), 2);
+        assert!(!backrun_bytes.is_empty());
+        assert_eq!(payload.block_number, 19_500_001);
+        assert!(!payload.body.is_empty());
+        assert!(payload.flashbots_signature.starts_with("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf:0x"));
     }
 }

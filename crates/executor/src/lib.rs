@@ -1,6 +1,8 @@
 //! Transaction execution, EIP-1559 formatting, and Flashbots bundle dispatch engine.
 
 pub mod bundle;
+pub mod calldata;
+pub mod nonce;
 pub mod relay;
 pub mod signer;
 
@@ -10,11 +12,13 @@ pub use bundle::{
     calculate_next_block_base_fee, CallBundleParams, CallBundleResponse, CallBundleTxResult,
     JsonRpcRequest, MevBundle, SendBundleParams, SendBundleResponse, MIN_BASE_FEE_WEI,
 };
+pub use calldata::{CompactHop, RawCalldataBuilder, CALLDATA_BUFFER_CAPACITY};
+pub use nonce::AtomicNonceManager;
 pub use relay::{
     RelayBroadcastResult, RelayClient, BEAVER_RELAY_URL, BUILDER0X69_RELAY_URL,
     FLASHBOTS_RELAY_URL, TITAN_RELAY_URL,
 };
-pub use signer::BundleSigner;
+pub use signer::{BundleSigner, FastBundleSigner, PreSignedBundlePayload};
 
 // Ingest compiled Foundry artifact directly at compile-time for zero-drift type safety
 sol!(

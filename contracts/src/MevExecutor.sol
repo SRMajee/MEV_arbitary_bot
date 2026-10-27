@@ -233,6 +233,147 @@ contract MevExecutor is IUniswapV2Callee, IUniswapV3SwapCallback {
         }
     }
 
+    /// @dev Basic structural validation on execution parameters (memory version).
+    function _validateParamsMemory(ExecutionParams memory params) internal view {
+        require(params.hops.length >= 2, "HopsTooShort");
+        require(params.hops[0].tokenIn == WETH, "StartMustBeWETH");
+        require(params.hops[params.hops.length - 1].tokenOut == WETH, "EndMustBeWETH");
+        require(params.bribeBps <= 10_000, "InvalidBribeBps");
+        require(params.amountIn > 0, "ZeroAmountIn");
+    }
+
+    /// @dev Memory-based direct arbitrage execution.
+    function _executeArbitrageDirectMemory(ExecutionParams memory params) internal {
+        _validateParamsMemory(params);
+
+        uint256 initialWeth = IERC20(WETH).balanceOf(address(this));
+        require(initialWeth >= params.amountIn, "InsufficientWethBalance");
+
+        uint256 hopsLength = params.hops.length;
+        for (uint256 i = 0; i < hopsLength; i++) {
+            Hop memory hop = params.hops[i];
+            uint256 currentIn = (i == 0)
+                ? params.amountIn
+                : IERC20(hop.tokenIn).balanceOf(address(this));
+
+            _executeHopMemory(hop, currentIn);
+        }
+
+        uint256 finalWeth = IERC20(WETH).balanceOf(address(this));
+        require(finalWeth > initialWeth, "NoProfit");
+
+        uint256 profit = finalWeth - initialWeth;
+        require(profit >= params.minProfit, "InsufficientProfit");
+
+        uint256 bribeAmount = (params.bribeBps > 0) ? (profit * uint256(params.bribeBps)) / 10_000 : 0;
+        emit ArbitrageExecuted(params.amountIn, profit - bribeAmount, bribeAmount);
+
+        _payBribe(bribeAmount);
+    }
+
+    /// @dev Memory-based flash swap arbitrage execution.
+    function _executeArbitrageFlashMemory(ExecutionParams memory params) internal {
+        _validateParamsMemory(params);
+        require(params.hops[0].protocol == Protocol.UniswapV2, "Hop0MustBeUniswapV2");
+
+        Hop memory hop0 = params.hops[0];
+        (uint112 r0, uint112 r1, ) = IUniswapV2Pair(hop0.pool).getReserves();
+        (uint256 rIn, uint256 rOut) = (hop0.tokenIn == IUniswapV2Pair(hop0.pool).token0())
+            ? (uint256(r0), uint256(r1))
+            : (uint256(r1), uint256(r0));
+
+        uint256 amountInWithFee = params.amountIn * 997;
+        uint256 amountOut = (amountInWithFee * rOut) / ((rIn * 1000) + amountInWithFee);
+
+        (uint256 a0, uint256 a1) = (hop0.tokenIn == IUniswapV2Pair(hop0.pool).token0())
+            ? (uint256(0), amountOut)
+            : (amountOut, uint256(0));
+
+        expectedPool = hop0.pool;
+        IUniswapV2Pair(hop0.pool).swap(a0, a1, address(this), abi.encode(params));
+        expectedPool = address(0);
+    }
+
+    /// @notice Mode C: Ultra-low latency compact bit-packed calldata entrypoint via fallback.
+    /// @dev Decodes header [mode(1B) | bribeBps(2B) | amountIn(16B) | minProfit(16B) | hopCount(1B)]
+    ///      and each 65B hop [pool(20B) | tokenIn(20B) | tokenOut(20B) | fee(3B) | protocol(1B) | zeroForOne(1B)]
+    ///      using raw Yul assembly to eliminate ABI decoding overhead.
+    fallback() external payable {
+        require(msg.sender == owner, "NotOwner");
+        require(msg.data.length >= 36, "InvalidCalldataLength");
+
+        uint8 mode;
+        uint16 bribeBps;
+        uint256 amountIn;
+        uint256 minProfit;
+        uint8 hopCount;
+
+        assembly {
+            let word0 := calldataload(0)
+            mode := shr(248, word0)
+            bribeBps := and(shr(232, word0), 0xffff)
+            amountIn := and(shr(104, word0), 0xffffffffffffffffffffffffffffffff)
+
+            let wordProfit := calldataload(19)
+            minProfit := shr(128, wordProfit)
+
+            let wordHop := calldataload(35)
+            hopCount := shr(248, wordHop)
+        }
+
+        require(msg.data.length == 36 + uint256(hopCount) * 65, "InvalidHopDataLength");
+        require(hopCount >= 2, "HopsTooShort");
+
+        Hop[] memory hops = new Hop[](hopCount);
+        for (uint256 i = 0; i < hopCount; i++) {
+            uint256 offset = 36 + i * 65;
+            address pool;
+            address tokenIn;
+            address tokenOut;
+            uint24 fee;
+            uint8 protocol;
+
+            assembly {
+                let w0 := calldataload(offset)
+                pool := shr(96, w0)
+
+                let w1 := calldataload(add(offset, 20))
+                tokenIn := shr(96, w1)
+
+                let w2 := calldataload(add(offset, 40))
+                tokenOut := shr(96, w2)
+
+                let w3 := calldataload(add(offset, 60))
+                fee := shr(232, w3)
+                protocol := and(shr(224, w3), 0xff)
+            }
+
+            require(protocol <= 1, "InvalidProtocol");
+
+            hops[i] = Hop({
+                protocol: Protocol(protocol),
+                pool: pool,
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                fee: fee,
+                sqrtPriceLimitX96: 0
+            });
+        }
+
+        ExecutionParams memory params = ExecutionParams({
+            amountIn: amountIn,
+            minProfit: minProfit,
+            bribeBps: bribeBps,
+            hops: hops
+        });
+
+        if (mode == 0) {
+            _executeArbitrageDirectMemory(params);
+        } else {
+            _executeArbitrageFlashMemory(params);
+        }
+    }
+
     /// @dev Basic structural validation on execution parameters.
     function _validateParams(ExecutionParams calldata params) internal view {
         require(params.hops.length >= 2, "HopsTooShort");

@@ -248,5 +248,145 @@ contract MevExecutorTest is Test {
         assertGt(builderEthAfter, builderEthBefore, "Builder should receive 90% of profit as ETH bribe");
     }
 
+    /// @dev Helper to encode compact bit-packed calldata matching Phase 2.4 spec.
+    function _encodeCompact(
+        uint8 mode,
+        uint16 bribeBps,
+        uint128 amountIn,
+        uint128 minProfit,
+        MevExecutor.Hop[] memory hops
+    ) internal pure returns (bytes memory) {
+        bytes memory data = abi.encodePacked(
+            mode,
+            bribeBps,
+            amountIn,
+            minProfit,
+            uint8(hops.length)
+        );
+        for (uint256 i = 0; i < hops.length; i++) {
+            data = abi.encodePacked(
+                data,
+                hops[i].pool,
+                hops[i].tokenIn,
+                hops[i].tokenOut,
+                hops[i].fee,
+                uint8(hops[i].protocol),
+                uint8(hops[i].tokenIn < hops[i].tokenOut ? 1 : 0)
+            );
+        }
+        return data;
+    }
+
+    /// @notice Test compact Yul calldata fallback for direct self-funded arbitrage.
+    function test_CompactYul_DirectSwap_ProfitableArbitrageAndBuilderBribe() public {
+        address whale = makeAddr("whale_compact_direct");
+        deal(WETH_ADDR, whale, 300 ether);
+
+        vm.startPrank(whale);
+        weth.transfer(SUSHISWAP_V2_WETH_USDC, 300 ether);
+        (uint112 sR0, uint112 sR1, ) = IUniswapV2Pair(SUSHISWAP_V2_WETH_USDC).getReserves();
+        uint256 amountInWithFee = 300 ether * 997;
+        uint256 usdcOut = (amountInWithFee * uint256(sR0)) / ((uint256(sR1) * 1000) + amountInWithFee);
+        IUniswapV2Pair(SUSHISWAP_V2_WETH_USDC).swap(usdcOut, 0, whale, "");
+        vm.stopPrank();
+
+        deal(WETH_ADDR, address(executor), 10 ether);
+        uint256 initialWeth = weth.balanceOf(address(executor));
+
+        MevExecutor.Hop[] memory hops = new MevExecutor.Hop[](2);
+        hops[0] = MevExecutor.Hop({
+            protocol: MevExecutor.Protocol.UniswapV2,
+            pool: UNISWAP_V2_WETH_USDC,
+            tokenIn: WETH_ADDR,
+            tokenOut: USDC_ADDR,
+            fee: 0,
+            sqrtPriceLimitX96: 0
+        });
+        hops[1] = MevExecutor.Hop({
+            protocol: MevExecutor.Protocol.UniswapV2,
+            pool: SUSHISWAP_V2_WETH_USDC,
+            tokenIn: USDC_ADDR,
+            tokenOut: WETH_ADDR,
+            fee: 0,
+            sqrtPriceLimitX96: 0
+        });
+
+        bytes memory compactData = _encodeCompact(
+            0, // mode 0 = Direct
+            5000, // 50% bribe
+            2 ether,
+            0.01 ether,
+            hops
+        );
+
+        assertEq(compactData.length, 36 + 2 * 65); // exactly 166 bytes!
+
+        uint256 builderEthBefore = builder.balance;
+
+        (bool ok, ) = address(executor).call(compactData);
+        assertTrue(ok, "Compact Yul direct swap should succeed");
+
+        uint256 finalWeth = weth.balanceOf(address(executor));
+        assertGt(finalWeth, initialWeth, "Executor captured profit via compact Yul");
+
+        uint256 builderEthAfter = builder.balance;
+        assertGt(builderEthAfter, builderEthBefore, "Builder received ETH bribe via compact Yul");
+    }
+
+    /// @notice Test compact Yul calldata fallback for zero-capital flash swap arbitrage.
+    function test_CompactYul_FlashSwap_ProfitableArbitrage() public {
+        address whale = makeAddr("whale_compact_flash");
+        deal(WETH_ADDR, whale, 400 ether);
+
+        vm.startPrank(whale);
+        weth.transfer(SUSHISWAP_V2_WETH_USDC, 400 ether);
+        (uint112 sR0, uint112 sR1, ) = IUniswapV2Pair(SUSHISWAP_V2_WETH_USDC).getReserves();
+        uint256 amountInWithFee = 400 ether * 997;
+        uint256 usdcOut = (amountInWithFee * uint256(sR0)) / ((uint256(sR1) * 1000) + amountInWithFee);
+        IUniswapV2Pair(SUSHISWAP_V2_WETH_USDC).swap(usdcOut, 0, whale, "");
+        vm.stopPrank();
+
+        assertEq(weth.balanceOf(address(executor)), 0);
+
+        MevExecutor.Hop[] memory hops = new MevExecutor.Hop[](2);
+        hops[0] = MevExecutor.Hop({
+            protocol: MevExecutor.Protocol.UniswapV2,
+            pool: UNISWAP_V2_WETH_USDC,
+            tokenIn: WETH_ADDR,
+            tokenOut: USDC_ADDR,
+            fee: 0,
+            sqrtPriceLimitX96: 0
+        });
+        hops[1] = MevExecutor.Hop({
+            protocol: MevExecutor.Protocol.UniswapV2,
+            pool: SUSHISWAP_V2_WETH_USDC,
+            tokenIn: USDC_ADDR,
+            tokenOut: WETH_ADDR,
+            fee: 0,
+            sqrtPriceLimitX96: 0
+        });
+
+        bytes memory compactData = _encodeCompact(
+            1, // mode 1 = Flash
+            9000, // 90% bribe
+            3 ether,
+            0.001 ether,
+            hops
+        );
+
+        assertEq(compactData.length, 36 + 2 * 65);
+
+        uint256 builderEthBefore = builder.balance;
+
+        (bool ok, ) = address(executor).call(compactData);
+        assertTrue(ok, "Compact Yul flash swap should succeed");
+
+        uint256 retainedWeth = weth.balanceOf(address(executor));
+        assertGt(retainedWeth, 0, "Executor retained profit via compact Yul flash swap");
+
+        uint256 builderEthAfter = builder.balance;
+        assertGt(builderEthAfter, builderEthBefore, "Builder received 90% bribe via compact Yul flash swap");
+    }
+
     receive() external payable {}
 }
