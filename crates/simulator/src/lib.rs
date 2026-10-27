@@ -2,11 +2,18 @@
 
 pub mod db;
 pub mod fork;
+pub mod prewarmed;
 pub mod runner;
 
 pub use db::{AlloyDB, AlloyDBError};
 pub use fork::ForkedSandbox;
+pub use prewarmed::{
+    compute_mapping_slot, compute_nested_mapping_slot, pack_v2_reserves_slot8,
+    pack_v3_liquidity_slot4, pack_v3_slot0, unpack_v2_reserves_slot8, PrewarmedDB,
+    PrewarmedDBError, StateSnapshot,
+};
 pub use runner::{build_call_tx, build_create_tx, SimulationResult, SimulationRunner};
+
 
 use mev_state::MarketState;
 use revm::database::EmptyDB;

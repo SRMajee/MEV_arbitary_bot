@@ -13,8 +13,9 @@ use alloy::{
     sol_types::SolCall,
 };
 use eyre::Result;
-use mev_simulator::{build_call_tx, AlloyDB, ForkedSandbox, SimulationRunner};
+use mev_simulator::{build_call_tx, AlloyDB, ForkedSandbox, PrewarmedDB, SimulationRunner};
 use mev_state::{USDC, WETH};
+
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -88,7 +89,7 @@ async fn test_mainnet_fork_simulation_and_backrun_branching() -> Result<()> {
 
     // 3. Initialize SimulationRunner & ForkedSandbox
     let runner = SimulationRunner::new(fork_block, 1711000000);
-    let mut sandbox = ForkedSandbox::new(alloy_db, runner);
+    let mut sandbox = ForkedSandbox::new(alloy_db.clone(), runner.clone());
 
     // 4. Set up victim caller account with ETH in sandbox
     let victim_caller = address!("9999999999999999999999999999999999999999");
@@ -118,9 +119,10 @@ async fn test_mainnet_fork_simulation_and_backrun_branching() -> Result<()> {
     println!("Executing victim transaction against forked block 19,500,000...");
     let victim_start = Instant::now();
     let victim_res = sandbox
-        .execute_victim(victim_tx)
+        .execute_victim(victim_tx.clone())
         .expect("victim transaction must execute");
     let initial_fetch_elapsed = victim_start.elapsed();
+
 
     println!(
         "Victim executed in {:?}: success={}, gas_used={}, logs={}",
@@ -184,5 +186,36 @@ async fn test_mainnet_fork_simulation_and_backrun_branching() -> Result<()> {
         avg_micros
     );
 
+    // 10. Freeze AlloyDB cache into zero-RPC PrewarmedDB and save to disk
+    println!("Freezing AlloyDB into zero-RPC PrewarmedDB and saving to disk snapshot...");
+    let prewarmed = PrewarmedDB::from_alloy_db(&alloy_db);
+    assert!(prewarmed.accounts_len() > 0, "must freeze accounts");
+    assert!(prewarmed.storage_len() > 0, "must freeze storage slots");
+
+    let tmp_path = std::env::temp_dir().join("mainnet_fork_19500000_snapshot.bin");
+    prewarmed.save_to_disk(&tmp_path)?;
+    assert!(tmp_path.exists(), "snapshot file must be written to disk");
+
+    // 11. Load snapshot back into a fresh PrewarmedDB with ZERO network connection
+    println!("Loading snapshot from disk into fresh PrewarmedDB (zero RPC)...");
+    let loaded_db = PrewarmedDB::load_from_disk(&tmp_path)?;
+    assert_eq!(loaded_db.accounts_len(), prewarmed.accounts_len());
+    assert_eq!(loaded_db.storage_len(), prewarmed.storage_len());
+
+    // 12. Run fresh simulation on loaded_db (zero RPC) and assert bit-for-bit execution parity
+    let mut zero_rpc_sandbox = ForkedSandbox::new(loaded_db, runner.clone());
+    zero_rpc_sandbox.set_balance(victim_caller, one_eth * U256::from(10));
+    let zero_rpc_res = zero_rpc_sandbox
+        .simulate_tx(victim_tx)
+        .expect("zero-RPC simulation must succeed");
+
+    assert_eq!(zero_rpc_res.success, victim_res.success, "execution success status must match");
+    assert_eq!(zero_rpc_res.gas_used, victim_res.gas_used, "gas used must match exactly");
+    assert_eq!(zero_rpc_res.logs.len(), victim_res.logs.len(), "event logs count must match");
+
+    let _ = std::fs::remove_file(tmp_path);
+    println!("Zero-RPC PrewarmedDB snapshot verification passed with 100% parity!");
+
     Ok(())
 }
+

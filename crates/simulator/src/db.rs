@@ -82,6 +82,27 @@ impl<P: Provider + Clone + 'static> AlloyDB<P> {
         self.storage.read().unwrap().len()
     }
 
+    /// Returns a cloned snapshot of the cached accounts map.
+    pub fn accounts_cache(&self) -> HashMap<Address, Option<AccountInfo>> {
+        self.accounts.read().unwrap().clone()
+    }
+
+    /// Returns a cloned snapshot of the cached contract bytecodes map.
+    pub fn contracts_cache(&self) -> HashMap<B256, Bytecode> {
+        self.contracts.read().unwrap().clone()
+    }
+
+    /// Returns a cloned snapshot of the cached storage slots map.
+    pub fn storage_cache(&self) -> HashMap<(Address, U256), U256> {
+        self.storage.read().unwrap().clone()
+    }
+
+    /// Returns a cloned snapshot of the cached block hashes map.
+    pub fn block_hashes_cache(&self) -> HashMap<u64, B256> {
+        self.block_hashes.read().unwrap().clone()
+    }
+
+
     /// Executes an async future synchronously, safely handling both current-thread and multi-thread runtimes.
     fn block_on<F: std::future::Future<Output = R> + Send, R: Send>(&self, f: F) -> R {
         let handle = self.handle.clone().or_else(|| tokio::runtime::Handle::try_current().ok());
