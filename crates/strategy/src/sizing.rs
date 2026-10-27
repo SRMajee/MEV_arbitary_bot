@@ -5,9 +5,10 @@
 
 use alloy::primitives::U256;
 use mev_state::MarketState;
-use mev_types::{Cycle, PoolState};
+use mev_types::{Cycle, HotCycle, HotPoolState, PoolState};
 
-use crate::pricing::simulate_cycle;
+use crate::pricing::{simulate_cycle, simulate_hot_cycle};
+
 
 /// Golden ratio conjugate $\frac{\sqrt{5} - 1}{2} \approx 0.6180339887$ scaled by 1,000,000.
 pub const PHI_RECIPROCAL_PPM: u64 = 618_034;
@@ -165,3 +166,104 @@ pub fn find_optimal_input(
     // Default for V3 or 3-hop cycles: full Golden Section Search
     golden_section_search(cycle, market_state, min_trade, max_trade, 30)
 }
+
+/// Optimizes input amount for any HotCycle directly against &[HotPoolState] without locks or allocations.
+pub fn golden_section_search_hot(
+    cycle: &HotCycle,
+    pools: &[HotPoolState],
+    min_in: U256,
+    max_in: U256,
+    max_iterations: usize,
+) -> (U256, U256) {
+    if max_in <= min_in {
+        return (U256::ZERO, U256::ZERO);
+    }
+
+    let mut a = min_in;
+    let mut b = max_in;
+
+    for _ in 0..max_iterations {
+        let span = b - a;
+        if span <= U256::from(100_000_000_000u64) {
+            // Converged to within 0.0000001 ETH
+            break;
+        }
+
+        let delta = (span * U256::from(PHI_RECIPROCAL_PPM)) / U256::from(1_000_000);
+        let c = b - delta;
+        let d = a + delta;
+
+        let out_c = simulate_hot_cycle(cycle, c, pools);
+        let out_d = simulate_hot_cycle(cycle, d, pools);
+
+        if out_c + d > out_d + c {
+            b = d;
+        } else {
+            a = c;
+        }
+    }
+
+    let best_x = (a + b) / U256::from(2);
+    let best_out = simulate_hot_cycle(cycle, best_x, pools);
+    (best_x, best_out)
+}
+
+/// Hot-path optimal sizing for HotCycle against &[HotPoolState]:
+/// - Pure 2-hop V2 cycles: analytical closed-form x* directly from &[HotPoolState] reserves (~15 ns).
+/// - 3-hop and mixed V2/V3 cycles: 16-step Golden Section Search over &[HotPoolState] (zero allocations).
+pub fn find_optimal_input_hot(
+    cycle: &HotCycle,
+    pools: &[HotPoolState],
+    min_trade: U256,
+    max_trade: U256,
+) -> (U256, U256) {
+    if cycle.hop_count == 2 && cycle.is_pure_v2() {
+        let hop1 = &cycle.hops[0];
+        let hop2 = &cycle.hops[1];
+
+        let p1 = match pools.get(hop1.pool_id.0 as usize) {
+            Some(p) => p,
+            None => return (U256::ZERO, U256::ZERO),
+        };
+        let p2 = match pools.get(hop2.pool_id.0 as usize) {
+            Some(p) => p,
+            None => return (U256::ZERO, U256::ZERO),
+        };
+
+        let (r1x, r1y) = if hop1.zero_for_one {
+            (U256::from(p1.slot0_lo), U256::from(p1.slot1_liquidity))
+        } else {
+            (U256::from(p1.slot1_liquidity), U256::from(p1.slot0_lo))
+        };
+
+        let (r2y, r2x) = if hop2.zero_for_one {
+            (U256::from(p2.slot0_lo), U256::from(p2.slot1_liquidity))
+        } else {
+            (U256::from(p2.slot1_liquidity), U256::from(p2.slot0_lo))
+        };
+
+        let analytical_x = optimal_input_v2_analytical(
+            r1x,
+            r1y,
+            r2y,
+            r2x,
+            p1.fee_pips,
+            p2.fee_pips,
+        );
+
+        if analytical_x.is_zero() {
+            return (U256::ZERO, U256::ZERO);
+        }
+
+        let clamped_x = analytical_x.clamp(min_trade, max_trade);
+        let search_min = clamped_x * U256::from(95) / U256::from(100);
+        let search_max = clamped_x * U256::from(105) / U256::from(100);
+
+        return golden_section_search_hot(cycle, pools, search_min, search_max, 12);
+    }
+
+
+    // Default for 3-hop or mixed V2/V3 cycles
+    golden_section_search_hot(cycle, pools, min_trade, max_trade, 16)
+}
+

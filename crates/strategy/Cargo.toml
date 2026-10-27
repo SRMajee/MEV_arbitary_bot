@@ -15,7 +15,14 @@ mev-executor.workspace = true
 tracing.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
+smallvec.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 revm.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "strategy_latency"
+harness = false
+

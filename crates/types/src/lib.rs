@@ -349,6 +349,113 @@ impl HotPoolState {
     }
 }
 
+/// Compact 8-byte cache-friendly single swap hop for pre-computed cycle routing.
+///
+/// Designed with exact byte alignment:
+/// - pool_id: PoolId (2 bytes)
+/// - token_in: TokenId (2 bytes)
+/// - token_out: TokenId (2 bytes)
+/// - zero_for_one: bool (1 byte, true if token_in == pool.token0)
+/// - variant: u8 (1 byte, 0 = V2, 1 = V3)
+/// Total = exactly 8 bytes (size_of == 8, align_of == 2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(C)]
+pub struct HotCycleHop {
+    pub pool_id: PoolId,     // 2 bytes
+    pub token_in: TokenId,   // 2 bytes
+    pub token_out: TokenId,  // 2 bytes
+    pub zero_for_one: bool,  // 1 byte (true if token_in == pool.token0)
+    pub variant: u8,         // 1 byte (0 = V2, 1 = V3) -> Exact Total = 8 bytes!
+}
+
+impl HotCycleHop {
+    #[inline(always)]
+    pub fn new(
+        pool_id: PoolId,
+        token_in: TokenId,
+        token_out: TokenId,
+        zero_for_one: bool,
+        variant: u8,
+    ) -> Self {
+        Self {
+            pool_id,
+            token_in,
+            token_out,
+            zero_for_one,
+            variant,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_v2(&self) -> bool {
+        self.variant == 0
+    }
+
+    #[inline(always)]
+    pub fn is_v3(&self) -> bool {
+        self.variant == 1
+    }
+}
+
+/// A compact, heap-free pre-computed cyclic arbitrage route.
+///
+/// Supports 2, 3, or up to 4 hops inline with zero heap allocation:
+/// - 4 hops * 8 bytes = 32 bytes
+/// - hop_count: 1 byte
+/// - _padding: 1 byte
+/// - base_token: 2 bytes
+/// Total = 36 bytes (fits inside a single 64-byte L1 cache line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(C)]
+pub struct HotCycle {
+    pub hops: [HotCycleHop; 4],
+    pub hop_count: u8,
+    pub _padding: [u8; 1],
+    pub base_token: TokenId,
+}
+
+impl HotCycle {
+    /// Creates a new 2-hop cycle.
+    #[inline(always)]
+    pub fn new_2hop(hop0: HotCycleHop, hop1: HotCycleHop, base_token: TokenId) -> Self {
+        Self {
+            hops: [hop0, hop1, HotCycleHop::default(), HotCycleHop::default()],
+            hop_count: 2,
+            _padding: [0],
+            base_token,
+        }
+    }
+
+    /// Creates a new 3-hop cycle.
+    #[inline(always)]
+    pub fn new_3hop(
+        hop0: HotCycleHop,
+        hop1: HotCycleHop,
+        hop2: HotCycleHop,
+        base_token: TokenId,
+    ) -> Self {
+        Self {
+            hops: [hop0, hop1, hop2, HotCycleHop::default()],
+            hop_count: 3,
+            _padding: [0],
+            base_token,
+        }
+    }
+
+    /// Returns a slice of the active hops in this cycle.
+    #[inline(always)]
+    pub fn active_hops(&self) -> &[HotCycleHop] {
+        &self.hops[..self.hop_count as usize]
+    }
+
+    /// Returns true if all hops in this cycle are Uniswap V2 variant.
+    #[inline(always)]
+    pub fn is_pure_v2(&self) -> bool {
+        self.active_hops().iter().all(|h| h.is_v2())
+    }
+}
+
+
 /// A block header notification event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewBlockHeader {
@@ -460,4 +567,26 @@ mod tests {
         };
         assert!(!broken_cycle.validate());
     }
+
+    #[test]
+    fn test_hot_cycle_hop_and_cycle_size() {
+        assert_eq!(
+            std::mem::size_of::<HotCycleHop>(),
+            8,
+            "HotCycleHop MUST be exactly 8 bytes"
+        );
+        assert_eq!(
+            std::mem::size_of::<HotCycle>(),
+            36,
+            "HotCycle MUST be exactly 36 bytes"
+        );
+
+        let hop1 = HotCycleHop::new(PoolId(1), TokenId(0), TokenId(1), true, 0);
+        let hop2 = HotCycleHop::new(PoolId(2), TokenId(1), TokenId(0), false, 0);
+        let cycle = HotCycle::new_2hop(hop1, hop2, TokenId(0));
+        assert_eq!(cycle.hop_count, 2);
+        assert!(cycle.is_pure_v2());
+        assert_eq!(cycle.active_hops().len(), 2);
+    }
 }
+
